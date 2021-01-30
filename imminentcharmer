@@ -1,0 +1,29 @@
+    public static function init(param1:MainJeu, param2:String, param3:String, param4:int, param5:Boolean, param6:int = 2147483647) : void
+      {
+         Multijoueur.jeu = param1;
+         Multijoueur.nom = param2;
+         Multijoueur.localAddress = param3.split("|");
+         Multijoueur.localPort = param4;
+         Multijoueur.enligne = param5;
+         Multijoueur.maxJoueurs = !!param5?int(param6):int(int.MAX_VALUE);
+         Multijoueur.sauvegardeEquipementJoueurs = new Dictionary();
+         if(param5)
+         {
+            netCon = new NetConnection();
+            netCon.addEventListener(NetStatusEvent.NET_STATUS,netStatusHandler_serveur);
+            netCon.connect(STRATUS_SERVER);
+            clientsOnline = new Vector.<ClientOnline>();
+         }
+         else
+         {
+            serverSocket = new ServerSocket();
+            clients = new Vector.<Client>();
+            serverSocket.bind(param4);
+            serverSocket.addEventListener(ServerSocketConnectEvent.CONNECT,onConnect);
+            serverSocket.listen();
+            ipBroadcastSocket = new DatagramSocket();
+            ipBroadcastSocket.bind(4444);
+            ipBroadcastSocket.addEventListener(DatagramSocketDataEvent.DATA,dataReceived);
+            ipBroadcastSocket.receive();
+         }
+      }
