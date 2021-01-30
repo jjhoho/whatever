@@ -1,0 +1,805 @@
+package aurora.jeuModele.multijoueur
+{
+   import aurora.MainJeu;
+   import aurora.jeuModele.Terrain;
+   import aurora.jeuModele.perso.Joueur;
+   import aurora.jeuModele.perso.Perso;
+   import flash.events.DatagramSocketDataEvent;
+   import flash.events.Event;
+   import flash.events.IOErrorEvent;
+   import flash.events.NetStatusEvent;
+   import flash.events.ProgressEvent;
+   import flash.events.ServerSocketConnectEvent;
+   import flash.events.TimerEvent;
+   import flash.net.DatagramSocket;
+   import flash.net.NetConnection;
+   import flash.net.NetStream;
+   import flash.net.ServerSocket;
+   import flash.net.Socket;
+   import flash.utils.ByteArray;
+   import flash.utils.Dictionary;
+   import flash.utils.Timer;
+   
+   public class Multijoueur
+   {
+      
+      private static var serverSocket:ServerSocket;
+      
+      public static var nom:String;
+      
+      public static var localPort:int = 0;
+      
+      public static var enligne:Boolean;
+      
+      public static var maxJoueurs:int;
+      
+      public static var localAddress:Array;
+      
+      private static var clients:Vector.<Client>;
+      
+      private static var clientsOnline:Vector.<ClientOnline>;
+      
+      public static var clientSocket:Socket;
+      
+      public static var jeu:MainJeu;
+      
+      private static var ipBroadcastSocket:DatagramSocket;
+      
+      private static var clientBuffer:ByteArray;
+      
+      private static const STRATUS_SERVER:String = "rtmfp://rtmfp.aurora-dusk.com:1985";
+      
+      public static const ERREUR_MAX_JOUEURS:String = "maxPlayersReached";
+      
+      private static var netCon:NetConnection;
+      
+      private static var sendStream:NetStream;
+      
+      private static var receiveStream:NetStream;
+      
+      public static var cle:String;
+      
+      private static var netCon2:NetConnection;
+      
+      private static var sendStream2:NetStream;
+      
+      private static var receiveStream2:NetStream;
+      
+      private static var cle2:String;
+      
+      private static var bufferTemporaire:ByteArray;
+      
+      private static var timerDeconnection:Timer;
+      
+      private static var sauvegardeEquipementJoueurs:Dictionary;
+       
+      
+      public function Multijoueur()
+      {
+         super();
+      }
+      
+      public static function init(param1:MainJeu, param2:String, param3:String, param4:int, param5:Boolean, param6:int = 2147483647) : void
+      {
+         Multijoueur.jeu = param1;
+         Multijoueur.nom = param2;
+         Multijoueur.localAddress = param3.split("|");
+         Multijoueur.localPort = param4;
+         Multijoueur.enligne = param5;
+         Multijoueur.maxJoueurs = !!param5?int(param6):int(int.MAX_VALUE);
+         Multijoueur.sauvegardeEquipementJoueurs = new Dictionary();
+         if(param5)
+         {
+            netCon = new NetConnection();
+            netCon.addEventListener(NetStatusEvent.NET_STATUS,netStatusHandler_serveur);
+            netCon.connect(STRATUS_SERVER);
+            clientsOnline = new Vector.<ClientOnline>();
+         }
+         else
+         {
+            serverSocket = new ServerSocket();
+            clients = new Vector.<Client>();
+            serverSocket.bind(param4);
+            serverSocket.addEventListener(ServerSocketConnectEvent.CONNECT,onConnect);
+            serverSocket.listen();
+            ipBroadcastSocket = new DatagramSocket();
+            ipBroadcastSocket.bind(4444);
+            ipBroadcastSocket.addEventListener(DatagramSocketDataEvent.DATA,dataReceived);
+            ipBroadcastSocket.receive();
+         }
+      }
+      
+      private static function netStatusHandler_serveur(param1:NetStatusEvent) : void
+      {
+         switch(param1.info.code)
+         {
+            case "NetConnection.Connect.Success":
+               cle = netCon.nearID;
+               sendStream = new NetStream(netCon,NetStream.DIRECT_CONNECTIONS);
+               sendStream.addEventListener(NetStatusEvent.NET_STATUS,sendStatusHandler_serveur);
+               sendStream.publish("chat");
+               jeu.actualiser_cle_serveur(cle);
+               break;
+            case "NetStream.Connect.Closed":
+               receiveStream = null;
+         }
+      }
+      
+      private static function netStatusHandler_client(param1:NetStatusEvent) : void
+      {
+         switch(param1.info.code)
+         {
+            case "NetConnection.Connect.Success":
+               sendStream = new NetStream(netCon,NetStream.DIRECT_CONNECTIONS);
+               sendStream.addEventListener(NetStatusEvent.NET_STATUS,sendStatusHandler_client);
+               sendStream.publish("chat");
+               peerConnect_client(cle);
+               break;
+            case "NetStream.Connect.Closed":
+               receiveStream = null;
+               ioErrorHandler();
+         }
+      }
+      
+      private static function sendStatusHandler_serveur(param1:NetStatusEvent) : void
+      {
+         if(param1.info.code == "NetStream.Play.Start")
+         {
+            if(receiveStream == null)
+            {
+               peerConnect(param1.target.peerStreams[param1.target.peerStreams.length - 1].farID);
+            }
+         }
+      }
+      
+      private static function peerConnect(param1:String) : void
+      {
+         var _loc2_:ClientOnline = null;
+         var _loc3_:ByteArray = null;
+         if(clientsOnline.length < maxJoueurs - 1)
+         {
+            _loc2_ = new ClientOnline(STRATUS_SERVER,sendStream,messageReceived_serveur,envoyer_terrain,jeu.message_normal);
+            clientsOnline.push(_loc2_);
+            _loc2_.addEventListener(Event.CLOSE,onDisconnect);
+            _loc2_.numero = clientsOnline.length;
+         }
+         else
+         {
+            _loc3_ = new ByteArray();
+            _loc3_.writeUTF(ERREUR_MAX_JOUEURS);
+            sendStream.send("messageReceived",_loc3_);
+         }
+      }
+      
+      private static function peerConnect_client(param1:String) : void
+      {
+         receiveStream = new NetStream(netCon,param1);
+         var _loc2_:Object = new Object();
+         _loc2_.messageReceived = messageReceived_client;
+         receiveStream.client = _loc2_;
+         receiveStream.addEventListener(NetStatusEvent.NET_STATUS,receiveStatusHandler);
+         receiveStream.play("chat");
+         timerDeconnection = new Timer(8000,1);
+         timerDeconnection.addEventListener(TimerEvent.TIMER_COMPLETE,forcer_deconnection);
+         timerDeconnection.start();
+      }
+      
+      private static function forcer_deconnection(param1:TimerEvent) : void
+      {
+         timerDeconnection.removeEventListener(TimerEvent.TIMER_COMPLETE,forcer_deconnection);
+         timerDeconnection = null;
+         ioErrorHandler();
+      }
+      
+      private static function sendStatusHandler_client(param1:NetStatusEvent) : void
+      {
+         if(param1.info.code == "NetStream.Play.Start")
+         {
+         }
+      }
+      
+      private static function receiveStatusHandler(param1:NetStatusEvent) : void
+      {
+         if(param1.info.code == "NetStream.Play.Start")
+         {
+            timerDeconnection.removeEventListener(TimerEvent.TIMER_COMPLETE,forcer_deconnection);
+            timerDeconnection.stop();
+            timerDeconnection = null;
+         }
+         else if(param1.info.code == "NetStream.Play.UnpublishNotify")
+         {
+         }
+      }
+      
+      private static function sendMessage(param1:ByteArray) : void
+      {
+         if(sendStream == null)
+         {
+            return;
+         }
+         sendStream.send("messageReceived",param1);
+      }
+      
+      private static function sendMessage2(param1:ByteArray) : void
+      {
+         if(sendStream2 == null)
+         {
+            return;
+         }
+         sendStream2.send("messageReceived",param1);
+      }
+      
+      public static function messageReceived_serveur(param1:ClientOnline, param2:ByteArray) : void
+      {
+         var tempClient:ClientOnline = param1;
+         var e:ByteArray = param2;
+         try
+         {
+            jeu.gerer_actions_joueur(e,tempClient.numero);
+            return;
+         }
+         catch(erreur:Error)
+         {
+            return;
+         }
+      }
+      
+      public static function messageReceived_client(param1:ByteArray) : void
+      {
+         var _loc2_:String = param1.readUTF();
+         if(_loc2_ == ERREUR_MAX_JOUEURS)
+         {
+            jeu.erreur_critique("Cannot join the game.\nMax players reached.");
+         }
+         else if(_loc2_.length == 64)
+         {
+            cle2 = _loc2_;
+            netCon2 = new NetConnection();
+            netCon2.addEventListener(NetStatusEvent.NET_STATUS,netStatusHandler2);
+            netCon2.connect(STRATUS_SERVER);
+         }
+      }
+      
+      public static function messageReceived_client2(param1:ByteArray) : void
+      {
+         jeu.editer_infosJoueur(param1);
+      }
+      
+      private static function netStatusHandler2(param1:NetStatusEvent) : void
+      {
+         switch(param1.info.code)
+         {
+            case "NetConnection.Connect.Success":
+               if(!sendStream2)
+               {
+                  sendStream2 = new NetStream(netCon2,NetStream.DIRECT_CONNECTIONS);
+                  sendStream2.addEventListener(NetStatusEvent.NET_STATUS,sendStatusHandler2);
+                  sendStream2.publish("chat");
+               }
+               break;
+            case "NetStream.Connect.Success":
+               break;
+            case "NetStream.Connect.Closed":
+         }
+      }
+      
+      private static function sendStatusHandler2(param1:NetStatusEvent) : void
+      {
+         var _loc2_:Object = null;
+         if(param1.info.code == "NetStream.Play.Start")
+         {
+            if(bufferTemporaire && sendStream2)
+            {
+               sendStream2.send("messageReceived",bufferTemporaire);
+            }
+         }
+         else if(param1.info.code == "NetStream.Publish.Start")
+         {
+            if(!receiveStream2)
+            {
+               receiveStream2 = new NetStream(netCon2,cle2);
+               _loc2_ = new Object();
+               _loc2_.messageReceived = messageReceived_client2;
+               receiveStream2.client = _loc2_;
+               receiveStream2.addEventListener(NetStatusEvent.NET_STATUS,receiveStatusHandler2);
+               receiveStream2.play("chat");
+            }
+         }
+      }
+      
+      private static function receiveStatusHandler2(param1:NetStatusEvent) : void
+      {
+      }
+      
+      private static function dataReceived(param1:DatagramSocketDataEvent) : void
+      {
+         var _loc4_:String = null;
+         var _loc5_:String = null;
+         var _loc6_:ByteArray = null;
+         var _loc2_:String = param1.data.readUTFBytes(param1.data.bytesAvailable);
+         var _loc3_:String = _loc2_.substr(1);
+         jeu.message_normal("Client searching you with IP: " + _loc3_);
+         for each(_loc5_ in localAddress)
+         {
+            if(_loc5_.substring(0,7) == "192.168" && _loc3_.substring(0,7) == "192.168" || _loc5_.substring(0,7) == "169.254" && _loc3_.substring(0,7) == "169.254")
+            {
+               _loc4_ = _loc5_;
+            }
+            else if(_loc5_.substring(0,7) != "192.168" && _loc3_.substring(0,7) != "192.168" && _loc5_.substring(0,7) != "169.254" && _loc3_.substring(0,7) != "169.254")
+            {
+               _loc4_ = _loc5_;
+            }
+         }
+         _loc6_ = new ByteArray();
+         _loc6_.writeUTFBytes("S" + nom + "|" + _loc4_);
+         jeu.message_normal("=> Response IP: " + _loc4_);
+         ipBroadcastSocket.send(_loc6_,0,0,_loc2_.substr(1),4445);
+      }
+      
+      private static function onConnect(param1:ServerSocketConnectEvent) : void
+      {
+         var _loc2_:Client = new Client(param1.socket);
+         _loc2_.addEventListener(ProgressEvent.SOCKET_DATA,onClientSocketData);
+         _loc2_.addEventListener(Event.CLOSE,onDisconnect);
+         clients.push(_loc2_);
+         _loc2_.numero = clients.length;
+         envoyer_terrain(_loc2_.numero - 1);
+      }
+      
+      private static function onClientSocketData(param1:ProgressEvent) : void
+      {
+         var _loc2_:Client = Client(param1.currentTarget);
+         var _loc3_:ByteArray = new ByteArray();
+         _loc2_.socket.readBytes(_loc3_,0,_loc2_.socket.bytesAvailable);
+         enregistrer_buffer_serveur(_loc2_,_loc3_);
+      }
+      
+      private static function enregistrer_buffer_serveur(param1:Object, param2:ByteArray) : void
+      {
+         var _loc3_:uint = 0;
+         var _loc4_:uint = 0;
+         param1.clientBuffer.writeBytes(param2);
+         param1.clientBuffer.position = 0;
+         while(param1.clientBuffer.bytesAvailable > 4)
+         {
+            _loc3_ = param1.clientBuffer.readUnsignedInt();
+            if(param1.clientBuffer.bytesAvailable >= _loc3_)
+            {
+               param2.clear();
+               param1.clientBuffer.readBytes(param2,0,_loc3_);
+               jeu.gerer_actions_joueur(param2,param1.numero);
+               _loc4_ = _loc4_ + (4 + _loc3_);
+               continue;
+            }
+            break;
+         }
+         if(_loc4_ == param1.clientBuffer.length)
+         {
+            param1.clientBuffer.clear();
+         }
+         else
+         {
+            param2.clear();
+            param1.clientBuffer.position = _loc4_;
+            param1.clientBuffer.readBytes(param2);
+            param1.clientBuffer.clear();
+            param1.clientBuffer.writeBytes(param2);
+         }
+      }
+      
+      private static function onDisconnect(param1:Event) : void
+      {
+         var _loc2_:int = 0;
+         var _loc3_:int = 0;
+         var _loc4_:ClientOnline = null;
+         var _loc5_:Client = null;
+         if(enligne)
+         {
+            _loc4_ = ClientOnline(param1.currentTarget);
+            _loc2_ = 0;
+            while(_loc2_ < clientsOnline.length)
+            {
+               if(clientsOnline[_loc2_] == _loc4_)
+               {
+                  if(_loc4_.noPersos.length)
+                  {
+                     jeu.supprimer_joueur_multijoueur(_loc4_.noPersos[0]);
+                  }
+                  jeu.supprimer_joueur(_loc4_.numero);
+                  for each(_loc3_ in _loc4_.noPersos)
+                  {
+                     sauvegardeEquipementJoueurs[jeu.persos.persos[_loc3_].nom] = jeu.persos.persos[_loc3_].sauvegarder_equipement();
+                     jeu.persos.supprimer_joueur(jeu.persos.persos[_loc3_]);
+                  }
+                  _loc4_.removeEventListener(Event.CLOSE,onDisconnect);
+                  _loc4_.dispose();
+                  _loc4_ = null;
+                  clientsOnline.splice(_loc2_,1);
+                  break;
+               }
+               _loc2_++;
+            }
+            _loc2_ = 0;
+            while(_loc2_ < clientsOnline.length)
+            {
+               if(clientsOnline[_loc2_].numero != _loc2_ + 1)
+               {
+                  actualiser_noJoueurs(clientsOnline[_loc2_].numero,_loc2_ + 1);
+                  clientsOnline[_loc2_].numero = _loc2_ + 1;
+               }
+               _loc2_++;
+            }
+         }
+         else
+         {
+            _loc5_ = Client(param1.currentTarget);
+            _loc2_ = 0;
+            while(_loc2_ < clients.length)
+            {
+               if(clients[_loc2_] == _loc5_)
+               {
+                  jeu.supprimer_joueur(_loc5_.numero);
+                  for each(_loc3_ in _loc5_.noPersos)
+                  {
+                     sauvegardeEquipementJoueurs[jeu.persos.persos[_loc3_].nom] = jeu.persos.persos[_loc3_].sauvegarder_equipement();
+                     jeu.persos.supprimer_joueur(jeu.persos.persos[_loc3_]);
+                  }
+                  _loc5_.removeEventListener(ProgressEvent.SOCKET_DATA,onClientSocketData);
+                  _loc5_.removeEventListener(Event.CLOSE,onDisconnect);
+                  _loc5_.dispose();
+                  _loc5_ = null;
+                  clients.splice(_loc2_,1);
+                  break;
+               }
+               _loc2_++;
+            }
+            _loc2_ = 0;
+            while(_loc2_ < clients.length)
+            {
+               if(clientsOnline[_loc2_].numero != _loc2_ + 1)
+               {
+                  actualiser_noJoueurs(clientsOnline[_loc2_].numero,_loc2_ + 1);
+                  clients[_loc2_].numero = _loc2_ + 1;
+               }
+               _loc2_++;
+            }
+         }
+      }
+      
+      private static function actualiser_noJoueurs(param1:int, param2:int) : void
+      {
+         var _loc3_:Object = null;
+         for each(_loc3_ in jeu.persos.persos)
+         {
+            if(_loc3_ is Joueur)
+            {
+               if(Joueur(_loc3_).noJoueur == param1)
+               {
+                  Joueur(_loc3_).changer_noJoueur(param2);
+               }
+            }
+         }
+      }
+      
+      public static function ajouter_joueur(param1:int, param2:int, param3:Object) : void
+      {
+         var _loc5_:Object = null;
+         var _loc6_:int = 0;
+         if(param2 >= jeu.persos.villes.length)
+         {
+            param2 = jeu.persos.villes.length - 1;
+         }
+         var _loc4_:int = jeu.persos.ajouter_nouveau_joueur(param2,param1,param3,jeu.config.towns,sauvegardeEquipementJoueurs[param3.name]);
+         if(enligne)
+         {
+            _loc6_ = 0;
+            while(_loc6_ < clientsOnline.length)
+            {
+               if(clientsOnline[_loc6_].numero == param1)
+               {
+                  clientsOnline[_loc6_].ajouter_joueur(_loc4_);
+                  break;
+               }
+               _loc6_++;
+            }
+         }
+         else
+         {
+            _loc6_ = 0;
+            while(_loc6_ < clients.length)
+            {
+               if(clients[_loc6_].numero == param1)
+               {
+                  clients[_loc6_].ajouter_joueur(_loc4_);
+                  break;
+               }
+               _loc6_++;
+            }
+         }
+         if(jeu.nbJoueurs <= param1)
+         {
+            jeu.ajouter_joueur(_loc4_,param2);
+            if(enligne)
+            {
+               envoyer_terrain(param1 - 1);
+            }
+         }
+         var _loc7_:ByteArray = new ByteArray();
+         _loc7_.writeByte(44);
+         _loc7_.writeInt(_loc4_);
+         envoyer_infos_client_direct(_loc6_,_loc7_);
+         jeu.message_important(jeu.persos.persos[Perso.prochaineId - 1].nom + " joins the game");
+         jeu.message_normal(jeu.persos.persos[Perso.prochaineId - 1].nom + " joins the game");
+         jeu.message_normal(jeu.persos.persos[Perso.prochaineId - 1].nom + " joins the game",param1);
+         if(enligne)
+         {
+            jeu.ajouter_joueur_multijoueur(_loc4_,jeu.persos.persos[Perso.prochaineId - 1].nom,jeu.persos.persos[Perso.prochaineId - 1].niveau.niveau);
+         }
+      }
+      
+      public static function exclure_joueur(param1:int) : void
+      {
+         var _loc2_:int = 0;
+         var _loc3_:int = 0;
+         if(enligne)
+         {
+            while(_loc2_ < clientsOnline.length)
+            {
+               for each(_loc3_ in clientsOnline[_loc2_].noPersos)
+               {
+                  if(_loc3_ == param1)
+                  {
+                     quitter_joueur(_loc2_,param1);
+                     return;
+                  }
+               }
+               _loc2_++;
+            }
+         }
+         else
+         {
+            _loc2_ = 0;
+            while(_loc2_ < clients.length)
+            {
+               for each(_loc3_ in clients[_loc2_].noPersos)
+               {
+                  if(_loc3_ == param1)
+                  {
+                     quitter_joueur(_loc2_,param1);
+                     return;
+                  }
+               }
+               _loc2_++;
+            }
+         }
+      }
+      
+      public static function quitter_joueur(param1:int, param2:int) : void
+      {
+         var _loc3_:Joueur = jeu.persos.persos[param2];
+         var _loc4_:ByteArray = new ByteArray();
+         _loc4_.writeByte(42);
+         _loc4_.writeUTF(_loc3_.nom);
+         _loc4_.writeObject(_loc3_.sauvegarder());
+         _loc4_.writeByte(52);
+         envoyer_infos_client_direct(param1,_loc4_);
+         jeu.message_important(_loc3_.nom + " quits the game");
+         if(enligne)
+         {
+            jeu.supprimer_joueur_multijoueur(param2);
+         }
+      }
+      
+      private static function envoyer_terrain(param1:int) : void
+      {
+         var _loc2_:ByteArray = new ByteArray();
+         _loc2_.writeByte(45);
+         _loc2_.writeObject(jeu.config);
+         _loc2_.writeInt(Terrain.donnees.length);
+         Terrain.donnees.position = 0;
+         _loc2_.writeBytes(Terrain.donnees);
+         envoyer_infos_client_direct(param1,_loc2_);
+      }
+      
+      public static function envoyer_infos_client(param1:int, param2:int, param3:int, param4:ByteArray) : void
+      {
+         var _loc5_:ByteArray = new ByteArray();
+         _loc5_.writeByte(param2);
+         _loc5_.writeInt(param3);
+         _loc5_.writeUnsignedInt(param4.length);
+         _loc5_.writeBytes(param4);
+         envoyer_infos_client_direct(param1,_loc5_);
+      }
+      
+      public static function envoyer_infos_client_direct(param1:int, param2:ByteArray) : void
+      {
+         if(enligne)
+         {
+            clientsOnline[param1].sendStream.send("messageReceived",param2);
+         }
+         else
+         {
+            clients[param1].socket.writeUnsignedInt(param2.length);
+            clients[param1].socket.writeBytes(param2);
+            clients[param1].socket.flush();
+         }
+      }
+      
+      public static function init_client(param1:MainJeu, param2:String, param3:int = -1) : void
+      {
+         Multijoueur.jeu = param1;
+         clientBuffer = new ByteArray();
+         enligne = param3 == -1;
+         if(enligne)
+         {
+            cle = param2;
+            netCon = new NetConnection();
+            netCon.addEventListener(NetStatusEvent.NET_STATUS,netStatusHandler_client);
+            netCon.connect(STRATUS_SERVER);
+         }
+         else
+         {
+            clientSocket = new Socket();
+            clientSocket.addEventListener(IOErrorEvent.IO_ERROR,ioErrorHandler);
+            clientSocket.addEventListener(ProgressEvent.SOCKET_DATA,socketDataHandler);
+            clientSocket.connect(param2,param3);
+         }
+      }
+      
+      public static function envoyer_joueur(param1:int, param2:Object) : void
+      {
+         var _loc3_:ByteArray = new ByteArray();
+         if(enligne)
+         {
+            param2 = Joueur.convertir_donnees(param2);
+            if(sendStream2)
+            {
+               _loc3_.writeByte(33);
+               _loc3_.writeByte(param1);
+               _loc3_.writeObject(param2);
+               sendStream2.send("messageReceived",_loc3_);
+            }
+            else
+            {
+               if(!bufferTemporaire)
+               {
+                  bufferTemporaire = new ByteArray();
+               }
+               bufferTemporaire.writeByte(33);
+               bufferTemporaire.writeByte(param1);
+               bufferTemporaire.writeObject(param2);
+            }
+         }
+         else
+         {
+            _loc3_.writeByte(33);
+            _loc3_.writeByte(param1);
+            _loc3_.writeObject(param2);
+            clientSocket.writeUnsignedInt(_loc3_.length);
+            clientSocket.writeBytes(_loc3_);
+            clientSocket.flush();
+         }
+      }
+      
+      public static function envoyer_actions(param1:ByteArray) : void
+      {
+         if(enligne)
+         {
+            sendMessage2(param1);
+         }
+         else if(clientSocket.connected)
+         {
+            clientSocket.writeUnsignedInt(param1.length);
+            clientSocket.writeBytes(param1);
+            clientSocket.flush();
+         }
+         else
+         {
+            jeu.erreur_critique("Connection error.\nConnection lost with the server.");
+         }
+      }
+      
+      private static function ioErrorHandler(param1:IOErrorEvent = null) : void
+      {
+         jeu.erreur_critique("Connection error.\nCannot connect to server.");
+      }
+      
+      private static function socketDataHandler(param1:ProgressEvent) : void
+      {
+         var _loc2_:ByteArray = new ByteArray();
+         clientSocket.readBytes(_loc2_,0,clientSocket.bytesAvailable);
+         enregistrer_buffer_client(_loc2_);
+      }
+      
+      private static function enregistrer_buffer_client(param1:ByteArray) : void
+      {
+         var _loc2_:uint = 0;
+         var _loc3_:uint = 0;
+         clientBuffer.writeBytes(param1);
+         clientBuffer.position = 0;
+         while(clientBuffer.bytesAvailable > 4)
+         {
+            _loc2_ = clientBuffer.readUnsignedInt();
+            if(clientBuffer.bytesAvailable >= _loc2_)
+            {
+               param1.clear();
+               clientBuffer.readBytes(param1,0,_loc2_);
+               jeu.editer_infosJoueur(param1);
+               _loc3_ = _loc3_ + (4 + _loc2_);
+               continue;
+            }
+            break;
+         }
+         if(_loc3_ == clientBuffer.length)
+         {
+            clientBuffer.clear();
+         }
+         else
+         {
+            param1.clear();
+            clientBuffer.position = _loc3_;
+            clientBuffer.readBytes(param1);
+            clientBuffer.clear();
+            clientBuffer.writeBytes(param1);
+         }
+      }
+      
+      public static function detruire() : void
+      {
+         if(serverSocket)
+         {
+            serverSocket.removeEventListener(ServerSocketConnectEvent.CONNECT,onConnect);
+            serverSocket.close();
+            serverSocket = null;
+         }
+         if(ipBroadcastSocket)
+         {
+            ipBroadcastSocket.removeEventListener(DatagramSocketDataEvent.DATA,dataReceived);
+            ipBroadcastSocket.close();
+            ipBroadcastSocket = null;
+         }
+         if(sendStream)
+         {
+            sendStream.removeEventListener(NetStatusEvent.NET_STATUS,sendStatusHandler_serveur);
+            sendStream.removeEventListener(NetStatusEvent.NET_STATUS,sendStatusHandler_client);
+            sendStream.close();
+            sendStream = null;
+         }
+         if(receiveStream)
+         {
+            if(receiveStream.client)
+            {
+               receiveStream.client = null;
+            }
+            receiveStream.removeEventListener(NetStatusEvent.NET_STATUS,receiveStatusHandler);
+            receiveStream.close();
+            receiveStream = null;
+         }
+         if(netCon)
+         {
+            netCon.removeEventListener(NetStatusEvent.NET_STATUS,netStatusHandler_serveur);
+            netCon.removeEventListener(NetStatusEvent.NET_STATUS,netStatusHandler_client);
+            netCon.close();
+            netCon = null;
+         }
+         if(sendStream2)
+         {
+            sendStream2.removeEventListener(NetStatusEvent.NET_STATUS,sendStatusHandler2);
+            sendStream2.close();
+            sendStream2 = null;
+         }
+         if(receiveStream2)
+         {
+            receiveStream2.removeEventListener(NetStatusEvent.NET_STATUS,receiveStatusHandler2);
+            receiveStream2.close();
+            receiveStream2 = null;
+         }
+         if(netCon2)
+         {
+            netCon2.removeEventListener(NetStatusEvent.NET_STATUS,netStatusHandler2);
+            netCon2.close();
+            netCon2 = null;
+         }
+      }
+   }
+}
